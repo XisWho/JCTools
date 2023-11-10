@@ -26,12 +26,20 @@ public final class Pow2 {
      * @throws IllegalArgumentException is value is more than MAX_POW2 or less than 0
      */
     public static int roundToPowerOfTwo(final int value) {
+        // 如果value > 2 ^ 30 或 value < 0 时将抛出IllegalArgumentException异常
         if (value > MAX_POW2) {
             throw new IllegalArgumentException("There is no larger power of 2 int for value:"+value+" since it exceeds 2^31.");
         }
         if (value < 0) {
             throw new IllegalArgumentException("Given value:"+value+". Expecting value >= 0.");
         }
+
+        // int numberOfLeadingZeros(int i) 给定一个int类型数据，返回这个数据的二进制串中从最左边算起连续的“0”的总数量。因为int类型的数据长度为32所以高位不足的地方会以“0”填充。
+        // 如 int x=1; int z=5;
+        // System.out.println(x+"的二进制表示为："+Integer.toBinaryString(x)+"最左边开始数起连续的0的个数为："+Integer.numberOfLeadingZeros(x));
+        // System.out.println(z+"的二进制表示为："+Integer.toBinaryString(z)+"最左边开始数起连续的0的个数为："+Integer.numberOfLeadingZeros(z));
+        // 1的二进制表示为：1最左边开始数起连续的0的个数为：31
+        // 5的二进制表示为：101最左边开始数起连续的0的个数为：29
         final int nextPow2 = 1 << (32 - Integer.numberOfLeadingZeros(value - 1));
         return nextPow2;
     }

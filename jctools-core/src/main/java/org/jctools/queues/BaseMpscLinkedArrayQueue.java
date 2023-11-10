@@ -188,18 +188,33 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
      */
     public BaseMpscLinkedArrayQueue(final int initialCapacity)
     {
+        // initialCapacity必须大于等于2
         RangeUtil.checkGreaterThanOrEqual(initialCapacity, 2, "initialCapacity");
 
+        // 容量确保是2的幂次方数，找到initialCapacity下一个2的幂次方数
         int p2capacity = Pow2.roundToPowerOfTwo(initialCapacity);
         // leave lower bit of mask clear
+        // index以2为步长增长，预留一个元素存JUMP，所以limit为（capacity-1）*2
         long mask = (p2capacity - 1) << 1;
         // need extra element to point at next array
+        // 需要一个额外元素来链接下一个数组
+        // 实际数组大小还是initialCapacity
         E[] buffer = allocateRefArray(p2capacity + 1);
+        // 目前生产者和消费者Buffer指向同一个数组
         producerBuffer = buffer;
         producerMask = mask;
         consumerBuffer = buffer;
         consumerMask = mask;
+        // 设置producerLimit=mask
         soProducerLimit(mask); // we know it's all empty to start with
+    }
+
+    public static void main(String[] args) {
+        int p2capacity = Pow2.roundToPowerOfTwo(100);
+        // leave lower bit of mask clear
+        long mask = (p2capacity - 1) << 1;
+        System.out.println(p2capacity);  // 128     10000000
+        System.out.println(mask);   // 254          11111110
     }
 
     @Override
@@ -238,14 +253,21 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
 
         while (true)
         {
+            // 获取生产者索引的最大限制，即producerLimit
             long producerLimit = lvProducerLimit();
+            // 获取生产者索引，即producerIndex
             pIndex = lvProducerIndex();
             // lower bit is indicative of resize, if we see it we spin until it's cleared
+            // 生产索引以2为步长递增，
+            // 第0位标识为resize，所以非扩容场景，不会是奇数，
+            // 扩容的时候，会在offerSlowPath()中扩容线程会将其设为奇数
             if ((pIndex & 1) == 1)
             {
+                // 奇数代表正在扩容，自旋，等待扩容完成
                 continue;
             }
             // pIndex is even (lower bit is 0) -> actual index is (pIndex >> 1)
+            // pIndex 是偶数， 实际的索引值 需要 除以2
 
             // mask/buffer may get changed by resizing -> only use for array access after successful CAS.
             mask = this.producerMask;
@@ -253,8 +275,11 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             // a successful CAS ties the ordering, lv(pIndex) - [mask/buffer] -> cas(pIndex)
 
             // assumption behind this optimization is that queue is almost always empty or near empty
+            // 阈值 producerLimit 小于等于生产者指针位置 pIndex时，需要扩容
+            // 此时还没有将e插入到队列中
             if (producerLimit <= pIndex)
             {
+                // 通过offerSlowPath返回状态值，来查看怎么来处理这个待添加的元素
                 int result = offerSlowPath(mask, pIndex, producerLimit);
                 switch (result)
                 {
@@ -270,12 +295,17 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 }
             }
 
+            // 阈值 producerLimit 大于 生产者指针位置 pIndex
+            // 直接通过CAS操作对pIndex做加2处理
             if (casProducerIndex(pIndex, pIndex + 2))
             {
                 break;
             }
         }
+
         // INDEX visible before ELEMENT
+        // 将buffer数组的指定位置替换为e，
+        // 不是根据下标来设置的，是根据槽位的地址偏移量offset，UNSAFE操作。
         final long offset = modifiedCalcCircularRefElementOffset(pIndex, mask);
         soRefElement(buffer, offset, e); // release element e
         return true;
@@ -290,22 +320,49 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     @Override
     public E poll()
     {
+        // 存储元素的数组
         final E[] buffer = consumerBuffer;
+        // 读取consumerIndex的值，注意这里是lp不是lv
         final long cIndex = lpConsumerIndex();
         final long mask = consumerMask;
 
+        // 计算在数组中的偏移量
         final long offset = modifiedCalcCircularRefElementOffset(cIndex, mask);
+        // 取元素，前面通过StoreStore写入的，这里通过LoadLoad取出来的就是最新值
         Object e = lvRefElement(buffer, offset);
         if (e == null)
         {
             long pIndex = lvProducerIndex();
             // isEmpty?
+            // 队列中一个元素都没有了，则直接返回
             if ((cIndex - pIndex) / 2 == 0)
             {
                 return null;
             }
             // poll() == null iff queue is empty, null element is not strong enough indicator, so we must
             // spin until element is visible.
+            // 我觉得代码执行到这里有两种情况
+            // 第一种，假如cIndex = 0，从来没有消费过
+            //      第一步生产者代码 casProducerIndex(pIndex, pIndex + 2) ，将producerIndex = producerIndex + 2 = 2 。
+            //      第二步，消费者代码执行
+            //          offset = modifiedCalcCircularRefElementOffset(cIndex, mask)
+            //          e = lvRefElement(buffer, offset) ，并且 e == null
+            //          long pIndex = lvProducerIndex();
+            //          (cIndex - pIndex) / 2 等价于 0 - 2 / 2 = -1 ，执行下面代码块，进入死循环
+            //          直到生产者代码soRefElement(buffer, offset, e) 执行完毕
+            //      此时e !=null ，退出下面死循环，这样做的目的，是因为生产者代码casProducerIndex(pIndex, pIndex + 2) 和
+            //      soRefElement(buffer, offset, e) 不是原子性，因此消费者代码需要用这种补偿机制，但从代码设计角度上来看
+            // Netty 这样做也是为了提升代码的性能。
+
+            // 第二种情况 ：
+            //      两个消费者线程同时执行到final long offset = modifiedCalcCircularRefElementOffset(cIndex, mask);
+            //      这一行代码线程1 执行了
+            //          Object e = lvRefElement(buffer, offset);
+            //          soRefElement(buffer, offset, null); 下边的代码，此时 offset位置的元素被置空
+            //      此时线程2才执行
+            //          Object e = lvRefElement(buffer, offset); ,e == null
+            //      队列中还有其他元素  (cIndex - pIndex) / 2 !=0
+            //      则线程2会进入下面代码块，一直死循环等待，直接offset 位置被设置了元素
             do
             {
                 e = lvRefElement(buffer, offset);
@@ -313,14 +370,19 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             while (e == null);
         }
 
+        // 如果当前元素是JUMP，是到next数组中查找元素
         if (e == JUMP)
         {
             final E[] nextBuffer = nextBuffer(buffer, mask);
             return newBufferPoll(nextBuffer, cIndex);
         }
 
+        // 将消费的元素从数组中移除
+        // 更新取出的位置元素为null，注意是sp，不是so
         soRefElement(buffer, offset, null); // release element null
+        // 修改consumerIndex的索引为新值，使用StoreStore屏障，直接更新到主内存
         soConsumerIndex(cIndex + 2); // release cIndex
+        // 返回出队的元素
         return (E) e;
     }
 
@@ -367,29 +429,37 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
      */
     private int offerSlowPath(long mask, long pIndex, long producerLimit)
     {
+        // 消费者索引，即consumerIndex
         final long cIndex = lvConsumerIndex();
         long bufferCapacity = getCurrentBufferCapacity(mask);
 
+        // 消费索引+当前数组的容量 > 生产索引，代表当前数组已有部分元素被消费了
+        // 此时不会扩容，会使用已被消费的槽位
         if (cIndex + bufferCapacity > pIndex)
         {
+            // 修改producerLimit
             if (!casProducerLimit(producerLimit, cIndex + bufferCapacity))
             {
                 // retry from top
+                // CAS失败，自旋重试
                 return RETRY;
             }
             else
             {
                 // continue to pIndex CAS
+                // CAS修改 生产索引
                 return CONTINUE_TO_P_INDEX_CAS;
             }
         }
         // full and cannot grow
+        // 根据生产者和消费者索引判断Queue是否已满，无界队列永不会满
         else if (availableInQueue(pIndex, cIndex) <= 0)
         {
             // offer should return false;
             return QUEUE_FULL;
         }
         // grab index for resize -> set lower bit
+        // CAS的方式将producerIndex加1，奇数代表正在resize
         else if (casProducerIndex(pIndex, pIndex + 1))
         {
             // trigger a resize
@@ -728,10 +798,12 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     private void resize(long oldMask, E[] oldBuffer, long pIndex, E e, Supplier<E> s)
     {
         assert (e != null && s == null) || (e == null || s != null);
+        // 下一个Buffer的长度，MpscQueue会构建一个相同长度的Buffer
         int newBufferLength = getNextBufferSize(oldBuffer);
         final E[] newBuffer;
         try
         {
+            // 创建一个新的E[]
             newBuffer = allocateRefArray(newBufferLength);
         }
         catch (OutOfMemoryError oom)
@@ -741,31 +813,47 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             throw oom;
         }
 
+        // 生产者Buffer指向新的E[]
         producerBuffer = newBuffer;
+        // 计算新的Mask，Buffer长度不变的情况下，Mask也不变
         final int newMask = (newBufferLength - 2) << 1;
         producerMask = newMask;
 
+        // JUMP对象所放的位置 , 计算pIndex在旧数组的偏移
         final long offsetInOld = modifiedCalcCircularRefElementOffset(pIndex, oldMask);
+        // 计算pIndex在新数组的偏移，添加到队列的元素放在新数组的位置，大家发现一个规率没有
+        // 如果新旧数组长度一样时，JUMP在旧数组的索引位置和 元素放到新数组的
+        // 索引位置相等，这一点需要注意，在看poll()代码时需要用到
         final long offsetInNew = modifiedCalcCircularRefElementOffset(pIndex, newMask);
 
+        // 都是CAS操作，设置新加入的元素到新数组
         soRefElement(newBuffer, offsetInNew, e == null ? s.get() : e);// element in new array
+        // 旧数组的最后一个位置指向新的数组，将指向新数组的指针存储于旧数组的length-1的索引位置
         soRefElement(oldBuffer, nextArrayOffset(oldMask), newBuffer);// buffer linked
 
         // ASSERT code
         final long cIndex = lvConsumerIndex();
+        // 这里需要注意 ，maxQueueCapacity的初始值为 maxCapacity * 2，而pIndex、cIndex也是以2为单位递增的
         final long availableInQueue = availableInQueue(pIndex, cIndex);
         RangeUtil.checkPositive(availableInQueue, "availableInQueue");
 
         // Invalidate racing CASs
+        // 更新limit
         // We never set the limit beyond the bounds of a buffer
+        // 取newMask和availableInQueue的最小值 加上 pIndex，因为后面也是会进行取余取下标的
         soProducerLimit(pIndex + Math.min(newMask, availableInQueue));
 
         // make resize visible to the other producers
+        // 更新pIndex
         soProducerIndex(pIndex + 2);
 
         // INDEX visible before ELEMENT, consistent with consumer expectation
 
         // make resize visible to consumer
+        // pIndex在旧数组的位置设置一个固定值-JUMP，来告诉要跳到下一个数组
+        // 将JUMP 存储在旧数组的offsetInOld位置，当消费者查找到元素为
+        // JUMP，证明数组已经扩容，则根据next数组指针找到下一个数组
+        // 在next数组相同的位置的元素，就是本次要消费的元素
         soRefElement(oldBuffer, offsetInOld, JUMP);
     }
 

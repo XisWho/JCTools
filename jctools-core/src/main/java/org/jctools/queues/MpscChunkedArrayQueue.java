@@ -25,12 +25,18 @@ abstract class MpscChunkedArrayQueueColdProducerFields<E> extends BaseMpscLinked
 {
     protected final long maxQueueCapacity;
 
+    /**
+     * @param initialCapacity 初始容量
+     * @param maxCapacity 最大容量
+     */
     MpscChunkedArrayQueueColdProducerFields(int initialCapacity, int maxCapacity)
     {
         super(initialCapacity);
         RangeUtil.checkGreaterThanOrEqual(maxCapacity, 4, "maxCapacity");
         RangeUtil.checkLessThan(roundToPowerOfTwo(initialCapacity), roundToPowerOfTwo(maxCapacity),
             "initialCapacity");
+
+        // maxQueueCapacity = maxCapacity *  2 ，这里只不过通过左移的方式来计算，提升效率
         maxQueueCapacity = ((long) Pow2.roundToPowerOfTwo(maxCapacity)) << 1;
     }
 }
@@ -61,6 +67,10 @@ public class MpscChunkedArrayQueue<E> extends MpscChunkedArrayQueueColdProducerF
 
     public MpscChunkedArrayQueue(int maxCapacity)
     {
+        // 你传入任意一个整数n ，如果 2 ^ i < n <= 2^j ，则返回2 ^ j，保证返回值一定是2 的幂次方，
+        // 如 2 ^ 5 < 33 <= 2 ^ 6 ，则返回 2 的 6 次方 64 。因此再来理解 min(1024, roundToPowerOfTwo(maxCapacity / 8))) 这行代码就容易了，
+        // 传入maxCapacity = 4 ，则roundToPowerOfTwo(maxCapacity / 8) 等于 roundToPowerOfTwo(0) 等于1 ， 而min(1024, 1 ) = 1 ，max(1,2) = 2 ，
+        // 因此调用super(initialCapacity,maxCapacity) 的参数值分别为2和4，为什么这样设计呢？哈哈，我也不知道
         super(max(2, min(1024, roundToPowerOfTwo(maxCapacity / 8))), maxCapacity);
     }
 
